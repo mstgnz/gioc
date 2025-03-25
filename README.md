@@ -15,6 +15,8 @@
 - **Thread Safety**: Built-in synchronization mechanisms for concurrent access.
 - **Simple API**: Easy-to-use and minimalistic interface to manage your dependencies.
 - **Resource Cleanup**: Automatic cleanup of resources using Go's finalizer mechanism.
+- **Constructor Injection**: Support for automatic dependency resolution for constructors.
+- **Multiple Scopes**: Support for Singleton, Transient, and Scoped lifetimes.
 
 ## Installation
 
@@ -24,165 +26,33 @@ To install `gioc`, you can use Go's `go get`:
 go get github.com/mstgnz/gioc
 ```
 
-## Quick Start
+## API Overview
 
-Here's a simple example to get you started:
+### Core Functions
 
-```go
-package main
+- **IOC[T]**: Main function for registering and retrieving instances.
+- **InjectConstructor[T]**: Creates instances with constructor injection.
+- **WithDependency**: Adds explicit dependencies to constructors.
+- **ListInstances**: Prints all registered instances (for debugging).
+- **ClearInstances**: Removes all registered instances.
+- **GetInstanceCount**: Returns the count of registered instances.
 
-import "github.com/mstgnz/gioc"
+### Scopes
 
-type Database struct {
-    connection string
-}
+- **Singleton** (default): One instance per application lifetime.
+- **Transient**: New instance created each time.
+- **Scoped**: One instance per scope (e.g., per request).
 
-func NewDatabase() *Database {
-    return &Database{connection: "localhost:5432"}
-}
+## Examples
 
-func main() {
-    // Get a singleton instance of Database
-    db := gioc.IOC(NewDatabase)
-    // Use the database instance
-}
-```
+For complete examples, see the [examples directory](./examples):
 
-## API Reference
-
-### IOC[T]
-
-```go
-func IOC[T any](fn func() T) T
-```
-
-The main function for registering and retrieving instances. It ensures that each component is initialized only once.
-
-**Parameters:**
-
-- `fn`: A factory function that creates and returns an instance of type T
-
-**Returns:**
-
-- An instance of type T (singleton)
-
-**Example:**
-
-```go
-type Service struct {
-    name string
-}
-
-func NewService() *Service {
-    return &Service{name: "my-service"}
-}
-
-func main() {
-    svc := gioc.IOC(NewService)
-}
-```
-
-### ListInstances
-
-```go
-func ListInstances()
-```
-
-Prints all currently registered instances in the IoC container. Useful for debugging.
-
-**Example:**
-
-```go
-func main() {
-    db := gioc.IOC(NewDatabase)
-    svc := gioc.IOC(NewService)
-    gioc.ListInstances()
-}
-```
-
-### ClearInstances
-
-```go
-func ClearInstances()
-```
-
-Removes all registered instances from the IoC container. Use with caution as it's not thread-safe.
-
-**Example:**
-
-```go
-func TestCleanup(t *testing.T) {
-    db := gioc.IOC(NewDatabase)
-    gioc.ClearInstances()
-    if gioc.GetInstanceCount() != 0 {
-        t.Error("Container should be empty")
-    }
-}
-```
-
-### GetInstanceCount
-
-```go
-func GetInstanceCount() int
-```
-
-Returns the number of currently registered instances.
-
-**Example:**
-
-```go
-func main() {
-    db := gioc.IOC(NewDatabase)
-    svc := gioc.IOC(NewService)
-    count := gioc.GetInstanceCount()
-    fmt.Printf("Number of instances: %d\n", count)
-}
-```
-
-## Advanced Usage
-
-### Dependency Injection Example
-
-```go
-type UserService struct {
-    db *Database
-}
-
-func NewUserService(db *Database) *UserService {
-    return &UserService{db: db}
-}
-
-func main() {
-    // Create database instance
-    db := gioc.IOC(NewDatabase)
-    // Create user service with database dependency
-    userService := gioc.IOC(func() *UserService {
-        return NewUserService(db)
-    })
-}
-```
-
-### Interface-based Example
-
-```go
-type Database interface {
-    Connect() error
-    Query(string) ([]byte, error)
-}
-
-type PostgresDB struct {
-    connection string
-}
-
-func NewPostgresDB() Database {
-    return &PostgresDB{connection: "localhost:5432"}
-}
-
-func main() {
-    var db Database
-    db = gioc.IOC(NewPostgresDB)
-}
-```
+- [Basic Usage](./examples/basic)
+- [Dependency Injection](./examples/dependency_injection)
+- [Constructor Injection](./examples/constructor_injection)
+- [Interface-Based Usage](./examples/interface_based)
+- [Cycle Detection](./examples/cycle_detection)
+- [Scope Examples](./examples/scope_example)
 
 ## Best Practices
 
@@ -248,11 +118,7 @@ Contributions are welcome! If you have any suggestions, improvements, or bug fix
 
 ## License
 
-`gioc` is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
-
-## Support
-
-If you encounter any issues or have questions, please open an issue on the GitHub repository.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Testing
 
@@ -284,12 +150,3 @@ Available benchmark tests:
 - `BenchmarkIOCLargeStruct`: Performance with large structs
 - `BenchmarkIOCWithDependencies`: Performance with dependency injection
 - `BenchmarkIOCMemoryAllocation`: Memory allocation patterns
-
-### Continuous Integration
-
-The project uses GitHub Actions for continuous integration:
-
-- Runs tests on every push and pull request
-- Generates and uploads test coverage reports
-- Performs race condition detection
-- Runs benchmarks

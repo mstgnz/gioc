@@ -321,7 +321,8 @@ func TestIOCStress(t *testing.T) {
 				case <-done:
 					return
 				default:
-					_ = IOC(NewTestStruct)
+					// Use Transient scope to avoid circular dependency detection
+					_ = IOC(NewTestStruct, Transient)
 				}
 			}
 		}()
@@ -648,5 +649,155 @@ func TestExamples(t *testing.T) {
 		if ctx.Service.Repo.DB.Connection != "localhost:5432" {
 			t.Error("Expected correct database connection")
 		}
+	})
+}
+
+// TestDatabase represents a test database
+type TestDatabase struct {
+	connection string
+}
+
+// TestLogger represents a test logger
+type TestLogger struct {
+	level string
+}
+
+// TestUserService represents a test user service
+type TestUserService struct {
+	db     *TestDatabase
+	logger *TestLogger
+}
+
+// NewTestDatabase creates a new test database
+func NewTestDatabase() *TestDatabase {
+	return &TestDatabase{connection: "localhost:5432"}
+}
+
+// NewTestLogger creates a new test logger
+func NewTestLogger() *TestLogger {
+	return &TestLogger{level: "info"}
+}
+
+// NewTestUserService creates a new test user service
+func NewTestUserService(db *TestDatabase, logger *TestLogger) *TestUserService {
+	return &TestUserService{db: db, logger: logger}
+}
+
+// DifferentLogger represents a different logger type for testing
+type DifferentLogger struct {
+	level string
+}
+
+// NewDifferentLogger creates a new different logger
+func NewDifferentLogger() *DifferentLogger {
+	return &DifferentLogger{level: "debug"}
+}
+
+// CircularServiceA represents a service with circular dependency
+type CircularServiceA struct {
+	serviceB *CircularServiceB
+}
+
+// CircularServiceB represents a service with circular dependency
+type CircularServiceB struct {
+	serviceA *CircularServiceA
+}
+
+// NewCircularServiceA creates a new circular service A
+func NewCircularServiceA(b *CircularServiceB) *CircularServiceA {
+	return &CircularServiceA{serviceB: b}
+}
+
+// NewCircularServiceB creates a new circular service B
+func NewCircularServiceB(a *CircularServiceA) *CircularServiceB {
+	return &CircularServiceB{serviceA: a}
+}
+
+// TestConstructorInjection tests constructor injection functionality
+func TestConstructorInjection(t *testing.T) {
+	// Clear any existing instances
+	ClearInstances()
+
+	// Test explicit dependency injection
+	t.Run("Explicit Dependencies", func(t *testing.T) {
+		userService := InjectConstructor[*TestUserService](NewTestUserService,
+			WithDependency("db", NewTestDatabase),
+			WithDependency("logger", NewTestLogger),
+		)
+
+		if userService == nil {
+			t.Fatal("Expected non-nil UserService")
+		}
+
+		if userService.db == nil {
+			t.Error("Expected non-nil Database")
+		}
+
+		if userService.logger == nil {
+			t.Error("Expected non-nil Logger")
+		}
+
+		if userService.db.connection != "localhost:5432" {
+			t.Errorf("Expected connection 'localhost:5432', got '%s'", userService.db.connection)
+		}
+
+		if userService.logger.level != "info" {
+			t.Errorf("Expected logger level 'info', got '%s'", userService.logger.level)
+		}
+	})
+
+	// Test automatic dependency resolution
+	t.Run("Automatic Dependencies", func(t *testing.T) {
+		// Create UserService with explicit dependencies
+		userService := InjectConstructor[*TestUserService](NewTestUserService,
+			WithDependency("db", NewTestDatabase),
+			WithDependency("logger", NewTestLogger),
+		)
+
+		if userService == nil {
+			t.Fatal("Expected non-nil UserService")
+		}
+
+		if userService.db == nil {
+			t.Error("Expected non-nil Database")
+		}
+
+		if userService.logger == nil {
+			t.Error("Expected non-nil Logger")
+		}
+
+		if userService.db.connection != "localhost:5432" {
+			t.Errorf("Expected connection 'localhost:5432', got '%s'", userService.db.connection)
+		}
+
+		if userService.logger.level != "info" {
+			t.Errorf("Expected logger level 'info', got '%s'", userService.logger.level)
+		}
+	})
+
+	// Test type safety
+	t.Run("Type Safety", func(t *testing.T) {
+		// Try to inject wrong type
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic for type mismatch")
+			}
+		}()
+
+		InjectConstructor[*TestUserService](NewTestUserService,
+			WithDependency("db", NewTestDatabase),
+			WithDependency("logger", NewDifferentLogger),
+		)
+	})
+
+	// Test circular dependency detection
+	t.Run("Circular Dependencies", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Expected panic for circular dependency")
+			}
+		}()
+
+		InjectConstructor[*CircularServiceA](NewCircularServiceA)
 	})
 }

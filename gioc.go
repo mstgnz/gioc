@@ -19,9 +19,13 @@
 package gioc
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"reflect"
+	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -290,4 +294,200 @@ func GetInstanceCount() int {
 	mu.RLock()
 	defer mu.RUnlock()
 	return len(instances)
+}
+
+// ConstructorOptions represents options for constructor injection
+type ConstructorOptions struct {
+	// Dependencies is a map of parameter names to their factory functions
+	Dependencies map[string]interface{}
+}
+
+// ConstructorOption is a function that modifies ConstructorOptions
+type ConstructorOption func(*ConstructorOptions)
+
+// WithDependency adds a dependency to the constructor options
+func WithDependency(name string, factory interface{}) ConstructorOption {
+	return func(o *ConstructorOptions) {
+		if o.Dependencies == nil {
+			o.Dependencies = make(map[string]interface{})
+		}
+		o.Dependencies[name] = factory
+	}
+}
+
+// InjectConstructor registers and initializes instances using constructor injection.
+// It automatically resolves dependencies and creates instances using the provided constructor function.
+//
+// Example:
+//
+//	type UserService struct {
+//	    db *Database
+//	    logger *Logger
+//	}
+//
+//	func NewUserService(db *Database, logger *Logger) *UserService {
+//	    return &UserService{db: db, logger: logger}
+//	}
+//
+//	func main() {
+//	    // Register dependencies
+//	    db := gioc.IOC(NewDatabase)
+//	    logger := gioc.IOC(NewLogger)
+//
+//	    // Create UserService with constructor injection
+//	    userService := gioc.InjectConstructor(NewUserService,
+//	        gioc.WithDependency("db", NewDatabase),
+//	        gioc.WithDependency("logger", NewLogger),
+//	    )
+//	}
+func InjectConstructor[T any](constructor interface{}, opts ...ConstructorOption) T {
+	// Create options
+	options := &ConstructorOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	// Get constructor function type
+	constructorType := reflect.TypeOf(constructor)
+	if constructorType.Kind() != reflect.Func {
+		panic("constructor must be a function")
+	}
+
+	// Get constructor parameters
+	numIn := constructorType.NumIn()
+	args := make([]reflect.Value, numIn)
+
+	// Resolve each parameter
+	for i := 0; i < numIn; i++ {
+		paramType := constructorType.In(i)
+		paramName := getParamName(constructor, i)
+
+		// Try to get dependency from options
+		if factory, exists := options.Dependencies[paramName]; exists {
+			factoryValue := reflect.ValueOf(factory)
+			if factoryValue.Kind() != reflect.Func {
+				panic(fmt.Sprintf("dependency factory for %s must be a function", paramName))
+			}
+
+			// Call factory function
+			result := factoryValue.Call(nil)
+			if len(result) != 1 {
+				panic(fmt.Sprintf("dependency factory for %s must return exactly one value", paramName))
+			}
+
+			// Check type compatibility
+			if !result[0].Type().AssignableTo(paramType) {
+				panic(fmt.Sprintf("dependency type mismatch for %s: expected %v, got %v",
+					paramName, paramType, result[0].Type()))
+			}
+
+			args[i] = result[0]
+			continue
+		}
+
+		// If no explicit dependency provided, try to find a registered instance
+		found := false
+		mu.RLock()
+		for _, instance := range instances {
+			instType := reflect.TypeOf(instance)
+			if instType.AssignableTo(paramType) {
+				args[i] = reflect.ValueOf(instance)
+				found = true
+				break
+			}
+		}
+		mu.RUnlock()
+
+		if !found {
+			// Try to find a constructor with standard naming convention
+
+			// First check if the dependency is registered with IOC
+			// Try to dynamically create the constructor for the dependency
+			// We'll use a workaround by creating a factory function for each dependency
+
+			// For test mocking, we'll allow dependency lookup by type if it exists in the options
+			for _, factory := range options.Dependencies {
+				factoryValue := reflect.ValueOf(factory)
+				if factoryValue.Kind() != reflect.Func {
+					continue
+				}
+
+				result := factoryValue.Call(nil)
+				if len(result) != 1 {
+					continue
+				}
+
+				if result[0].Type().AssignableTo(paramType) {
+					args[i] = result[0]
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				panic(fmt.Sprintf("no dependency found for parameter %s of type %v", paramName, paramType))
+			}
+		}
+	}
+
+	// Call constructor with resolved arguments
+	constructorValue := reflect.ValueOf(constructor)
+	result := constructorValue.Call(args)
+
+	if len(result) != 1 {
+		panic("constructor must return exactly one value")
+	}
+
+	return result[0].Interface().(T)
+}
+
+// getParamName returns the name of the parameter at the given index
+func getParamName(fn interface{}, index int) string {
+	// Get function file and line
+	file, line := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).FileLine(0)
+
+	// Read the file
+	fileHandle, err := os.Open(file)
+	if err != nil {
+		return fmt.Sprintf("param%d", index)
+	}
+	defer fileHandle.Close()
+
+	// Create scanner
+	scanner := bufio.NewScanner(fileHandle)
+	currentLine := 0
+	var functionLine string
+
+	// Find the function definition
+	for scanner.Scan() {
+		currentLine++
+		if currentLine == line {
+			functionLine = scanner.Text()
+			break
+		}
+	}
+
+	// Extract parameter names using regex
+	re := regexp.MustCompile(`func\s+\w+\s*\((.*?)\)`)
+	matches := re.FindStringSubmatch(functionLine)
+	if len(matches) != 2 {
+		return fmt.Sprintf("param%d", index)
+	}
+
+	// Split parameters
+	params := strings.Split(matches[1], ",")
+	if index >= len(params) {
+		return fmt.Sprintf("param%d", index)
+	}
+
+	// Clean up parameter name
+	param := strings.TrimSpace(params[index])
+	if strings.Contains(param, " ") {
+		parts := strings.Split(param, " ")
+		if len(parts) > 1 {
+			return parts[1]
+		}
+	}
+
+	return param
 }
