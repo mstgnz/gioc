@@ -1,6 +1,8 @@
 package gioc
 
 import (
+	"bufio"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -12,6 +14,23 @@ import (
 // TestStruct represents a test component
 type TestStruct struct {
 	Value string
+}
+
+// ServiceA and ServiceB are used for cycle detection tests
+type ServiceA struct {
+	ServiceB *ServiceB
+}
+
+type ServiceB struct {
+	ServiceA *ServiceA
+}
+
+// ConsoleLogger implements the Logger interface
+type ConsoleLogger struct{}
+
+// Log implements the Logger interface
+func (l *ConsoleLogger) Log(message string) {
+	// In a real implementation, this would log to console
 }
 
 // NewTestStruct creates a new TestStruct instance
@@ -317,4 +336,317 @@ func TestIOCStress(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Test timed out")
 	}
+}
+
+// TestCycleDetection tests cycle detection in dependency graph
+func TestCycleDetection(t *testing.T) {
+	ClearInstances()
+
+	var newServiceB func() *ServiceB
+	newServiceA := func() *ServiceA {
+		return &ServiceA{
+			ServiceB: IOC(newServiceB),
+		}
+	}
+	newServiceB = func() *ServiceB {
+		return &ServiceB{
+			ServiceA: IOC(newServiceA),
+		}
+	}
+
+	// This should panic due to circular dependency
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Expected panic for circular dependency")
+		} else {
+			panicMsg, ok := r.(string)
+			if !ok {
+				t.Errorf("Expected panic message to be string, got %T", r)
+			} else if !strings.Contains(panicMsg, "circular dependency") {
+				t.Errorf("Expected panic message to contain 'circular dependency', got '%s'", panicMsg)
+			}
+		}
+	}()
+
+	_ = IOC(newServiceA)
+}
+
+// TestScopes tests different scopes (Singleton, Transient, Scoped)
+func TestScopes(t *testing.T) {
+	ClearInstances()
+
+	type ScopedTest struct {
+		Value int
+	}
+
+	newScopedTest := func() *ScopedTest {
+		return &ScopedTest{Value: 42}
+	}
+
+	// Test Singleton scope (default)
+	instance1 := IOC(newScopedTest)
+	instance2 := IOC(newScopedTest)
+	if instance1 != instance2 {
+		t.Error("Singleton instances should be the same")
+	}
+
+	// Test Transient scope
+	instance3 := IOC(newScopedTest, Transient)
+	instance4 := IOC(newScopedTest, Transient)
+	if instance3 == instance4 {
+		t.Error("Transient instances should be different")
+	}
+
+	// Test Scoped scope (currently behaves like Transient)
+	instance5 := IOC(newScopedTest, Scoped)
+	instance6 := IOC(newScopedTest, Scoped)
+	if instance5 == instance6 {
+		t.Error("Scoped instances should be different (currently behaves like Transient)")
+	}
+}
+
+// TestListInstances tests the ListInstances function
+func TestListInstances(t *testing.T) {
+	ClearInstances()
+
+	type TestService struct {
+		Value string
+	}
+
+	newTestService := func() *TestService {
+		return &TestService{Value: "test"}
+	}
+
+	// Register some instances
+	_ = IOC(newTestService)            // Singleton instance
+	_ = IOC(newTestService, Transient) // Transient instance will not be stored
+	_ = IOC(newTestService, Singleton) // Another singleton instance (same as first)
+
+	// Capture stdout to verify ListInstances output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	ListInstances()
+
+	w.Close()
+
+	// Read the output
+	var output string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		output += scanner.Text() + "\n"
+	}
+
+	// Restore stdout
+	os.Stdout = oldStdout
+
+	// Verify output contains expected information
+	if !strings.Contains(output, "Registered instances:") {
+		t.Error("ListInstances output should contain header")
+	}
+	if !strings.Contains(output, "Singleton") {
+		t.Error("ListInstances output should contain Singleton scope")
+	}
+	if !strings.Contains(output, "*gioc.TestService") {
+		t.Error("ListInstances output should contain service type")
+	}
+}
+
+// TestGetCyclePath tests the getCyclePath function
+func TestGetCyclePath(t *testing.T) {
+	ClearInstances()
+
+	// Create a simple cycle with a single type
+	type SelfRef struct {
+		Self *SelfRef
+	}
+
+	var newSelfRef func() *SelfRef
+	newSelfRef = func() *SelfRef {
+		return &SelfRef{
+			Self: IOC(newSelfRef),
+		}
+	}
+
+	// This should panic and we'll verify the cycle path
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Expected panic for circular dependency")
+		} else {
+			panicMsg, ok := r.(string)
+			if !ok {
+				t.Errorf("Expected panic message to be string, got %T", r)
+			} else if !strings.Contains(panicMsg, "circular dependency") {
+				t.Errorf("Expected panic message to contain 'circular dependency', got '%s'", panicMsg)
+			}
+			// Since the type is not registered yet (due to cycle), we expect unknown type
+			if !strings.Contains(panicMsg, "unknown(") {
+				t.Error("Cycle path should contain unknown type")
+			}
+		}
+	}()
+
+	_ = IOC(newSelfRef)
+}
+
+// TestExamples tests all example files
+func TestExamples(t *testing.T) {
+	// Test basic example
+	t.Run("Basic", func(t *testing.T) {
+		ClearInstances()
+		// Basic example is already tested by TestIOCBasic
+	})
+
+	// Test cycle detection example
+	t.Run("CycleDetection", func(t *testing.T) {
+		ClearInstances()
+		// Cycle detection is already tested by TestCycleDetection
+	})
+
+	// Test dependency injection example
+	t.Run("DependencyInjection", func(t *testing.T) {
+		ClearInstances()
+
+		type Database struct {
+			Connection string
+		}
+
+		type UserRepository struct {
+			DB *Database
+		}
+
+		type UserService struct {
+			Repo *UserRepository
+		}
+
+		newDatabase := func() *Database {
+			return &Database{Connection: "localhost:5432"}
+		}
+
+		newUserRepository := func() *UserRepository {
+			return &UserRepository{
+				DB: IOC(newDatabase),
+			}
+		}
+
+		newUserService := func() *UserService {
+			return &UserService{
+				Repo: IOC(newUserRepository),
+			}
+		}
+
+		service := IOC(newUserService)
+		if service == nil {
+			t.Error("Expected non-nil service")
+			return
+		}
+		if service.Repo == nil {
+			t.Error("Expected non-nil repository")
+			return
+		}
+		if service.Repo.DB == nil {
+			t.Error("Expected non-nil database")
+			return
+		}
+		if service.Repo.DB.Connection != "localhost:5432" {
+			t.Error("Expected correct database connection")
+		}
+	})
+
+	// Test interface based example
+	t.Run("InterfaceBased", func(t *testing.T) {
+		ClearInstances()
+
+		type Logger interface {
+			Log(message string)
+		}
+
+		type Service struct {
+			Logger Logger
+		}
+
+		newLogger := func() Logger {
+			return &ConsoleLogger{}
+		}
+
+		newService := func() *Service {
+			return &Service{
+				Logger: IOC(newLogger),
+			}
+		}
+
+		service := IOC(newService)
+		if service == nil {
+			t.Error("Expected non-nil service")
+			return
+		}
+		if service.Logger == nil {
+			t.Error("Expected non-nil logger")
+		}
+	})
+
+	// Test scope example
+	t.Run("ScopeExample", func(t *testing.T) {
+		ClearInstances()
+
+		type Database struct {
+			Connection string
+		}
+
+		type UserRepository struct {
+			DB *Database
+		}
+
+		type UserService struct {
+			Repo *UserRepository
+		}
+
+		type RequestContext struct {
+			Service *UserService
+		}
+
+		newDatabase := func() *Database {
+			return &Database{Connection: "localhost:5432"}
+		}
+
+		newUserRepository := func() *UserRepository {
+			return &UserRepository{
+				DB: IOC(newDatabase),
+			}
+		}
+
+		newUserService := func() *UserService {
+			return &UserService{
+				Repo: IOC(newUserRepository),
+			}
+		}
+
+		newRequestContext := func() *RequestContext {
+			return &RequestContext{
+				Service: IOC(newUserService),
+			}
+		}
+
+		ctx := IOC(newRequestContext)
+		if ctx == nil {
+			t.Error("Expected non-nil context")
+			return
+		}
+		if ctx.Service == nil {
+			t.Error("Expected non-nil service")
+			return
+		}
+		if ctx.Service.Repo == nil {
+			t.Error("Expected non-nil repository")
+			return
+		}
+		if ctx.Service.Repo.DB == nil {
+			t.Error("Expected non-nil database")
+			return
+		}
+		if ctx.Service.Repo.DB.Connection != "localhost:5432" {
+			t.Error("Expected correct database connection")
+		}
+	})
 }
