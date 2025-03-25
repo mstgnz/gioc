@@ -43,6 +43,10 @@ var (
 	instances = make(map[uintptr]any)
 	types     = make(map[uintptr]reflect.Type)
 	scopes    = make(map[uintptr]Scope)
+	// Track dependency graph for cycle detection
+	dependencyGraph = make(map[uintptr]map[uintptr]bool)
+	// Track current resolution path for cycle detection
+	currentPath = make([]uintptr, 0)
 )
 
 // IOC registers and initializes instances of components using lazy initialization.
@@ -76,6 +80,8 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 		instances = make(map[uintptr]any)
 		types = make(map[uintptr]reflect.Type)
 		scopes = make(map[uintptr]Scope)
+		dependencyGraph = make(map[uintptr]map[uintptr]bool)
+		currentPath = make([]uintptr, 0)
 	})
 
 	// Get the function pointer and type information
@@ -84,6 +90,12 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 	fnType := fnValue.Type()
 	returnType := fnType.Out(0)
 	expectedType := reflect.TypeOf((*T)(nil)).Elem()
+
+	// Check for dependency cycles
+	if hasCycle := checkForCycle(key); hasCycle {
+		cyclePath := getCyclePath()
+		panic(fmt.Sprintf("circular dependency detected: %v", cyclePath))
+	}
 
 	// Determine the scope (default to Singleton if not specified)
 	var componentScope Scope = Singleton
@@ -120,8 +132,14 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 	}
 	mu.RUnlock()
 
+	// Add current component to resolution path
+	currentPath = append(currentPath, key)
+
 	// Create the instance before acquiring the write lock
 	instance := fn()
+
+	// Remove current component from resolution path
+	currentPath = currentPath[:len(currentPath)-1]
 
 	// Double-check pattern with write lock
 	mu.Lock()
@@ -151,10 +169,51 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 		delete(instances, key)
 		delete(types, key)
 		delete(scopes, key)
+		delete(dependencyGraph, key)
 		mu.Unlock()
 	})
 
 	return instance
+}
+
+// checkForCycle checks if adding the given key would create a cycle in the dependency graph
+func checkForCycle(key uintptr) bool {
+	// If the key is already in the current path, we have a cycle
+	for _, pathKey := range currentPath {
+		if pathKey == key {
+			return true
+		}
+	}
+	return false
+}
+
+// getCyclePath returns a string representation of the cycle path
+func getCyclePath() string {
+	if len(currentPath) == 0 {
+		return "empty path"
+	}
+
+	// Find the start of the cycle
+	cycleStart := 0
+	for i, key := range currentPath {
+		if key == currentPath[len(currentPath)-1] {
+			cycleStart = i
+			break
+		}
+	}
+
+	// Build the cycle path string
+	path := make([]string, 0)
+	for i := cycleStart; i < len(currentPath); i++ {
+		key := currentPath[i]
+		if t, exists := types[key]; exists {
+			path = append(path, t.String())
+		} else {
+			path = append(path, fmt.Sprintf("unknown(%d)", key))
+		}
+	}
+
+	return fmt.Sprintf("%v", path)
 }
 
 // ListInstances prints all currently registered instances in the IoC container.
@@ -210,6 +269,8 @@ func ClearInstances() {
 	instances = make(map[uintptr]any)
 	types = make(map[uintptr]reflect.Type)
 	scopes = make(map[uintptr]Scope)
+	dependencyGraph = make(map[uintptr]map[uintptr]bool)
+	currentPath = make([]uintptr, 0)
 }
 
 // GetInstanceCount returns the number of currently registered instances in the IoC container.
