@@ -1,3 +1,21 @@
+// Package gioc provides a simple and lightweight Inversion of Control (IoC) container for Go.
+// It implements lazy initialization and singleton pattern for managing application dependencies.
+//
+// Example:
+//
+//	type Database struct {
+//	    connection string
+//	}
+//
+//	func NewDatabase() *Database {
+//	    return &Database{connection: "localhost:5432"}
+//	}
+//
+//	func main() {
+//	    // Get a singleton instance of Database
+//	    db := gioc.IOC(NewDatabase)
+//	    // Use the database instance
+//	}
 package gioc
 
 import (
@@ -14,8 +32,31 @@ var (
 	types     = make(map[uintptr]reflect.Type)
 )
 
-// IOC registers and initializes instances of components
-// It ensures each component is initialized only once
+// IOC registers and initializes instances of components using lazy initialization.
+// It ensures each component is initialized only once and returns the same instance
+// for subsequent calls with the same factory function.
+//
+// The function is thread-safe and uses double-check locking pattern for optimal performance.
+//
+// Type parameter T represents the type of the component to be initialized.
+//
+// Example:
+//
+//	type Service struct {
+//	    name string
+//	}
+//
+//	func NewService() *Service {
+//	    return &Service{name: "my-service"}
+//	}
+//
+//	func main() {
+//	    // First call creates the instance
+//	    svc1 := gioc.IOC(NewService)
+//	    // Second call returns the same instance
+//	    svc2 := gioc.IOC(NewService)
+//	    // svc1 and svc2 are the same instance
+//	}
 func IOC[T any](fn func() T) T {
 	// Initialize the instances map only once
 	once.Do(func() {
@@ -82,7 +123,18 @@ func IOC[T any](fn func() T) T {
 	return instance
 }
 
-// ListInstances lists all the registered instances
+// ListInstances prints all currently registered instances in the IoC container.
+// This is useful for debugging and understanding the current state of the container.
+//
+// Example:
+//
+//	func main() {
+//	    // Register some instances
+//	    db := gioc.IOC(NewDatabase)
+//	    svc := gioc.IOC(NewService)
+//	    // List all instances
+//	    gioc.ListInstances()
+//	}
 func ListInstances() {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -93,7 +145,22 @@ func ListInstances() {
 	}
 }
 
-// ClearInstances removes all registered instances
+// ClearInstances removes all registered instances from the IoC container.
+// This function is useful for testing or when you need to reset the container state.
+// Note that this operation is not thread-safe and should be used with caution.
+//
+// Example:
+//
+//	func TestCleanup(t *testing.T) {
+//	    // Register some instances
+//	    db := gioc.IOC(NewDatabase)
+//	    // Clear all instances
+//	    gioc.ClearInstances()
+//	    // Verify container is empty
+//	    if gioc.GetInstanceCount() != 0 {
+//	        t.Error("Container should be empty")
+//	    }
+//	}
 func ClearInstances() {
 	mu.Lock()
 	defer mu.Unlock()
@@ -102,7 +169,19 @@ func ClearInstances() {
 	types = make(map[uintptr]reflect.Type)
 }
 
-// GetInstanceCount returns the number of registered instances
+// GetInstanceCount returns the number of currently registered instances in the IoC container.
+// This is useful for monitoring and debugging purposes.
+//
+// Example:
+//
+//	func main() {
+//	    // Register some instances
+//	    db := gioc.IOC(NewDatabase)
+//	    svc := gioc.IOC(NewService)
+//	    // Get the count
+//	    count := gioc.GetInstanceCount()
+//	    fmt.Printf("Number of instances: %d\n", count)
+//	}
 func GetInstanceCount() int {
 	mu.RLock()
 	defer mu.RUnlock()
