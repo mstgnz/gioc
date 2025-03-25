@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/mstgnz/gioc"
 )
@@ -43,35 +44,90 @@ type RequestContext struct {
 
 func NewRequestContext() *RequestContext {
 	fmt.Println("Creating new RequestContext...")
-	return &RequestContext{requestID: "req-123"}
+	return &RequestContext{requestID: fmt.Sprintf("req-%d", time.Now().UnixNano())}
+}
+
+// RequestService is a scoped service that depends on RequestContext
+type RequestService struct {
+	context *RequestContext
+	db      *Database
+}
+
+func NewRequestService(ctx *RequestContext, db *Database) *RequestService {
+	fmt.Println("Creating RequestService...")
+	return &RequestService{
+		context: ctx,
+		db:      db,
+	}
 }
 
 func main() {
+	// Clear any existing instances to start fresh
+	gioc.ClearInstances()
+
 	// Example 1: Singleton scope (default)
 	fmt.Println("\n=== Singleton Scope Example ===")
 	db1 := gioc.IOC(NewDatabase)
 	db2 := gioc.IOC(NewDatabase)
-	fmt.Printf("db1 == db2: %v\n", db1 == db2) // Should be true
+	fmt.Printf("db1 == db2: %v (should be true, singleton)\n", db1 == db2)
 
 	// Example 2: Transient scope
 	fmt.Println("\n=== Transient Scope Example ===")
 	ctx1 := gioc.IOC(NewRequestContext, gioc.Transient)
 	ctx2 := gioc.IOC(NewRequestContext, gioc.Transient)
-	fmt.Printf("ctx1 == ctx2: %v\n", ctx1 == ctx2) // Should be false
+	fmt.Printf("ctx1 == ctx2: %v (should be false, transient)\n", ctx1 == ctx2)
 
-	// Example 3: Scoped scope (currently behaves like Transient)
-	fmt.Println("\n=== Scoped Scope Example ===")
-	repo1 := gioc.IOC(func() *UserRepository { return NewUserRepository(db1) }, gioc.Scoped)
-	repo2 := gioc.IOC(func() *UserRepository { return NewUserRepository(db1) }, gioc.Scoped)
-	fmt.Printf("repo1 == repo2: %v\n", repo1 == repo2) // Should be false
+	// Example 3: Properly implemented Scoped lifetime
+	fmt.Println("\n=== Scoped Lifetime Example ===")
 
-	// Example 4: Dependency chain with mixed scopes
-	fmt.Println("\n=== Mixed Scopes Example ===")
-	service1 := gioc.IOC(func() *UserService { return NewUserService(repo1) })
-	service2 := gioc.IOC(func() *UserService { return NewUserService(repo2) })
-	fmt.Printf("service1 == service2: %v\n", service1 == service2) // Should be true (Singleton)
+	// First scope
+	fmt.Println("\nFirst scope:")
+	scopeCleanup1 := gioc.BeginScope()
+	fmt.Printf("Active scope: %s\n", gioc.GetActiveScope())
 
-	// List all registered instances with their scopes
+	service1 := gioc.IOC(func() *RequestService {
+		ctx := gioc.IOC(NewRequestContext, gioc.Scoped)
+		return NewRequestService(ctx, db1)
+	}, gioc.Scoped)
+
+	// Get it again, should be the same instance within this scope
+	service1Again := gioc.IOC(func() *RequestService {
+		ctx := gioc.IOC(NewRequestContext, gioc.Scoped)
+		return NewRequestService(ctx, db1)
+	}, gioc.Scoped)
+
+	fmt.Printf("service1 == service1Again: %v (should be true, same scope)\n", service1 == service1Again)
+
+	// List instances in this scope
+	gioc.ListScopedInstances()
+
+	// End first scope
+	scopeCleanup1()
+
+	// Second scope
+	fmt.Println("\nSecond scope:")
+	// Use the WithScope helper
+	gioc.WithScope(func() {
+		fmt.Printf("Active scope: %s\n", gioc.GetActiveScope())
+
+		service2 := gioc.IOC(func() *RequestService {
+			ctx := gioc.IOC(NewRequestContext, gioc.Scoped)
+			return NewRequestService(ctx, db1)
+		}, gioc.Scoped)
+
+		// service1 and service2 should be different as they're in different scopes
+		fmt.Printf("service1 == service2: %v (should be false, different scopes)\n", service1 == service2)
+
+		// List instances in this scope
+		gioc.ListScopedInstances()
+	})
+
+	// After second scope ends
+	fmt.Println("\nAfter all scopes:")
+	fmt.Printf("Active scope: %s (should be empty)\n", gioc.GetActiveScope())
+	gioc.ListScopedInstances() // Should say "No active scope"
+
+	// List all registered instances
 	fmt.Println("\n=== Registered Instances ===")
 	gioc.ListInstances()
 }

@@ -399,11 +399,55 @@ func TestScopes(t *testing.T) {
 		t.Error("Transient instances should be different")
 	}
 
-	// Test Scoped scope (currently behaves like Transient)
+	// Test Scoped scope with BeginScope
+	cleanup1 := BeginScope()
+	defer cleanup1()
+
+	// Create a scoped instance in first scope
 	instance5 := IOC(newScopedTest, Scoped)
 	instance6 := IOC(newScopedTest, Scoped)
-	if instance5 == instance6 {
-		t.Error("Scoped instances should be different (currently behaves like Transient)")
+
+	// Instance5 and instance6 should be the same within the same scope
+	if instance5 != instance6 {
+		t.Error("Scoped instances within the same scope should be the same")
+	}
+
+	// Get the current scope ID
+	scope1ID := GetActiveScope()
+	if scope1ID == "" {
+		t.Error("Expected a non-empty scope ID")
+	}
+
+	// End the first scope
+	cleanup1()
+
+	// Start a new scope
+	cleanup2 := BeginScope()
+	defer cleanup2()
+
+	// Get the current scope ID
+	scope2ID := GetActiveScope()
+	if scope2ID == "" {
+		t.Error("Expected a non-empty scope ID")
+	}
+	if scope1ID == scope2ID {
+		t.Error("Expected different scope IDs for different scopes")
+	}
+
+	// Create a new scoped instance in second scope
+	instance7 := IOC(newScopedTest, Scoped)
+
+	// Instance5 and instance7 should be different across different scopes
+	if instance5 == instance7 {
+		t.Error("Scoped instances across different scopes should be different")
+	}
+
+	// Get another instance in the second scope
+	instance8 := IOC(newScopedTest, Scoped)
+
+	// Instance7 and instance8 should be the same within the same scope
+	if instance7 != instance8 {
+		t.Error("Scoped instances within the same scope should be the same")
 	}
 }
 
@@ -900,4 +944,481 @@ func TestMemoryOptimizations(t *testing.T) {
 	if multiCount != 3 {
 		t.Errorf("Expected 3 different types, got %d", multiCount)
 	}
+}
+
+// TestWithScope tests the WithScope function
+func TestWithScope(t *testing.T) {
+	ClearInstances()
+
+	type ScopedService struct {
+		ID string
+	}
+
+	newScopedService := func() *ScopedService {
+		return &ScopedService{ID: "service-" + fmt.Sprint(time.Now().UnixNano())}
+	}
+
+	// Create a scoped service outside any scope
+	// This should be treated as transient without a scope
+	serviceOutsideScope := IOC(newScopedService, Scoped)
+
+	// Verify no active scope
+	if scopeID := GetActiveScope(); scopeID != "" {
+		t.Errorf("Expected no active scope, got scope ID: %s", scopeID)
+	}
+
+	var serviceInsideScope *ScopedService
+	var scopeID string
+
+	// Use WithScope to execute code in a scope
+	WithScope(func() {
+		// Get the scope ID
+		scopeID = GetActiveScope()
+		if scopeID == "" {
+			t.Error("Expected active scope inside WithScope")
+			return
+		}
+
+		// Create a scoped service inside the scope
+		serviceInsideScope = IOC(newScopedService, Scoped)
+
+		// Get the same service again
+		serviceSameScope := IOC(newScopedService, Scoped)
+
+		// Verify the services are the same within this scope
+		if serviceInsideScope != serviceSameScope {
+			t.Error("Expected same service within the same scope")
+		}
+
+		// Verify the service is different from the one outside scope
+		if serviceInsideScope == serviceOutsideScope {
+			t.Error("Expected different services across different scopes")
+		}
+	})
+
+	// After WithScope, verify the scope is cleaned up
+	if afterScopeID := GetActiveScope(); afterScopeID != "" {
+		t.Errorf("Expected no active scope after WithScope, got scope ID: %s", afterScopeID)
+	}
+
+	// Create another scoped service after scope is cleaned up
+	serviceAfterScope := IOC(newScopedService, Scoped)
+
+	// Verify it's different from the one inside the scope
+	if serviceAfterScope == serviceInsideScope {
+		t.Error("Expected different services after scope is cleaned up")
+	}
+
+	// Test nesting WithScope calls
+	WithScope(func() {
+		outerScopeID := GetActiveScope()
+
+		var innerService *ScopedService
+
+		// Create a service in the outer scope
+		outerService := IOC(newScopedService, Scoped)
+
+		// Execute another WithScope inside this one
+		WithScope(func() {
+			innerScopeID := GetActiveScope()
+
+			// Verify different scope IDs for nested scopes
+			if innerScopeID == outerScopeID {
+				t.Error("Expected different scope IDs for nested scopes")
+			}
+
+			// Create a service in the inner scope
+			innerService = IOC(newScopedService, Scoped)
+
+			// Verify it's different from the outer service
+			if innerService == outerService {
+				t.Error("Expected different services across nested scopes")
+			}
+		})
+
+		// After inner scope, verify outer scope is still active
+		if currentScopeID := GetActiveScope(); currentScopeID != outerScopeID {
+			t.Errorf("Expected outer scope ID %s to be active, got %s", outerScopeID, currentScopeID)
+		}
+	})
+
+	// After all scopes, verify no active scope
+	if finalScopeID := GetActiveScope(); finalScopeID != "" {
+		t.Errorf("Expected no active scope at the end, got scope ID: %s", finalScopeID)
+	}
+}
+
+// TestListScopedInstances tests the ListScopedInstances function
+func TestListScopedInstances(t *testing.T) {
+	ClearInstances()
+
+	// Create various test types
+	type ServiceA struct{ Name string }
+	type ServiceB struct{ Value int }
+
+	newServiceA := func() *ServiceA {
+		return &ServiceA{Name: "A"}
+	}
+
+	newServiceB := func() *ServiceB {
+		return &ServiceB{Value: 42}
+	}
+
+	// First test with no active scope
+	// Redirect stdout to capture output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	// This should print "No active scope"
+	ListScopedInstances()
+
+	w.Close()
+	capturedOutput := readFromPipe(r)
+	os.Stdout = oldStdout
+
+	if !strings.Contains(capturedOutput, "No active scope") {
+		t.Error("Expected 'No active scope' output when no scope is active")
+	}
+
+	// Now test with an active scope but no instances
+	WithScope(func() {
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+
+		// This should indicate no instances
+		ListScopedInstances()
+
+		w.Close()
+		capturedOutput = readFromPipe(r)
+		os.Stdout = oldStdout
+
+		if !strings.Contains(capturedOutput, "No instances in this scope") {
+			t.Error("Expected 'No instances in this scope' output for empty scope")
+		}
+
+		// Now add some scoped instances
+		serviceA := IOC(newServiceA, Scoped)
+		serviceB := IOC(newServiceB, Scoped)
+
+		// Verify the instances were created
+		if serviceA == nil || serviceB == nil {
+			t.Error("Failed to create scoped instances")
+			return
+		}
+
+		// Capture output again
+		r, w, _ = os.Pipe()
+		os.Stdout = w
+
+		// List the scoped instances
+		ListScopedInstances()
+
+		w.Close()
+		capturedOutput = readFromPipe(r)
+		os.Stdout = oldStdout
+
+		// Verify the output contains both service types
+		if !strings.Contains(capturedOutput, "*gioc.ServiceA") {
+			t.Error("Expected ServiceA in scoped instances output")
+		}
+		if !strings.Contains(capturedOutput, "*gioc.ServiceB") {
+			t.Error("Expected ServiceB in scoped instances output")
+		}
+	})
+}
+
+// readFromPipe is a helper to read content from a pipe
+func readFromPipe(r *os.File) string {
+	var output string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		output += scanner.Text() + "\n"
+	}
+	return output
+}
+
+// TestScopeConcurrentAccess tests concurrent access to scopes
+func TestScopeConcurrentAccess(t *testing.T) {
+	// Ana testi sadece alt testler içerecek şekilde basitleştirelim
+
+	// Aynı scope içindeki servis yeniden kullanım testi
+	t.Run("SameScopeInstanceReuse", func(t *testing.T) {
+		ClearInstances()
+
+		type ScopedService struct {
+			Name string
+		}
+
+		cleanup := BeginScope()
+		defer cleanup()
+
+		newService := func() *ScopedService {
+			return &ScopedService{Name: "test-service"}
+		}
+
+		// Aynı scope içinde aynı servisi iki kez alalım
+		service1 := IOC(newService, Scoped)
+		service2 := IOC(newService, Scoped)
+
+		// Aynı örnek olmaları gerekir
+		if service1 != service2 {
+			t.Error("Expected same instance within same scope")
+		}
+	})
+
+	// Farklı scope'larda farklı servis örneklerinin kullanıldığını doğrulayalım
+	t.Run("DifferentScopesDifferentInstances", func(t *testing.T) {
+		ClearInstances()
+
+		type ScopedService struct {
+			Name string
+		}
+
+		// İlk scope
+		cleanup1 := BeginScope()
+
+		newService := func() *ScopedService {
+			return &ScopedService{Name: "test-service"}
+		}
+
+		// İlk scope'ta bir servis alalım
+		service1 := IOC(newService, Scoped)
+
+		// İlk scope'u temizleyelim
+		cleanup1()
+
+		// İkinci scope
+		cleanup2 := BeginScope()
+		defer cleanup2()
+
+		// İkinci scope'ta aynı tür servis alalım
+		service2 := IOC(newService, Scoped)
+
+		// Farklı scope'larda farklı örnekler olmaları gerekir
+		if service1 == service2 {
+			t.Error("Expected different instances in different scopes")
+		}
+	})
+
+	// Eşzamanlı scope erişimi - basitleştirilmiş versiyon
+	t.Run("ConcurrentScopeAccess", func(t *testing.T) {
+		ClearInstances()
+
+		type ScopedService struct {
+			ID int
+		}
+
+		// Aynı scope içinde eşzamanlı erişim
+		var wg sync.WaitGroup
+		var services [5]*ScopedService
+
+		cleanup := BeginScope()
+		defer cleanup()
+
+		factory := func() *ScopedService {
+			return &ScopedService{ID: 42}
+		}
+
+		// Aynı scope içinde eşzamanlı olarak aynı servisi alalım
+		for i := 0; i < 5; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				services[idx] = IOC(factory, Scoped)
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Tüm örnekler aynı olmalı
+		for i := 1; i < 5; i++ {
+			if services[i] != services[0] {
+				t.Errorf("Expected all services to be the same instance in the same scope: services[0]=%v, services[%d]=%v",
+					services[0], i, services[i])
+			}
+		}
+	})
+}
+
+// TestClearInstancesWithScopes tests that ClearInstances properly cleans up scope contexts
+func TestClearInstancesWithScopes(t *testing.T) {
+	// Clear any existing instances to start fresh
+	ClearInstances()
+
+	// Create a service type for the test
+	type ScopedService struct {
+		Name string
+	}
+
+	newScopedService := func() *ScopedService {
+		return &ScopedService{Name: "test-service"}
+	}
+
+	// Start a scope
+	cleanup := BeginScope()
+	defer cleanup() // Should be unnecessary if ClearInstances works correctly
+
+	// Verify scope is active
+	if scopeID := GetActiveScope(); scopeID == "" {
+		t.Error("Expected active scope after BeginScope")
+		return
+	}
+
+	// Create some scoped instances
+	service := IOC(newScopedService, Scoped)
+	if service == nil {
+		t.Error("Failed to create scoped service")
+		return
+	}
+
+	// Create some singletons too
+	singleton := IOC(func() *ScopedService {
+		return &ScopedService{Name: "singleton"}
+	})
+
+	// Call ClearInstances
+	ClearInstances()
+
+	// Verify no active scope
+	if scopeID := GetActiveScope(); scopeID != "" {
+		t.Errorf("Expected no active scope after ClearInstances, got: %s", scopeID)
+	}
+
+	// Verify instance count is zero
+	count := GetInstanceCount()
+	if count != 0 {
+		t.Errorf("Expected 0 instances after ClearInstances, got: %d", count)
+	}
+
+	// Verify singleton is gone by creating a new one
+	newSingleton := IOC(func() *ScopedService {
+		return &ScopedService{Name: "new-singleton"}
+	})
+
+	// Should be a new instance
+	if newSingleton == singleton {
+		t.Error("Expected a new singleton instance after ClearInstances")
+	}
+
+	// Test with nested scopes
+	cleanup1 := BeginScope()
+	WithScope(func() {
+		// Create a service in the inner scope
+		innerService := IOC(newScopedService, Scoped)
+		if innerService == nil {
+			t.Error("Failed to create inner scoped service")
+			return
+		}
+
+		// Clear instances should clear all scopes
+		ClearInstances()
+
+		// Verify no active scope
+		if scopeID := GetActiveScope(); scopeID != "" {
+			t.Errorf("Expected no active scope after ClearInstances with nested scopes, got: %s", scopeID)
+		}
+	})
+
+	// The outer cleanup should be unnecessary
+	cleanup1()
+
+	// Verify we can start a new scope after clearing
+	cleanup2 := BeginScope()
+	defer cleanup2()
+
+	// Get a new service
+	newService := IOC(newScopedService, Scoped)
+	if newService == nil {
+		t.Error("Failed to create new scoped service after ClearInstances")
+	}
+
+	// Verify we have an active scope
+	if scopeID := GetActiveScope(); scopeID == "" {
+		t.Error("Expected active scope after BeginScope following ClearInstances")
+	}
+}
+
+// BenchmarkScopedIOC tests the performance of creating and retrieving scoped instances
+func BenchmarkScopedIOC(b *testing.B) {
+	ClearInstances()
+
+	type BenchService struct {
+		Value int
+	}
+
+	newBenchService := func() *BenchService {
+		return &BenchService{Value: 42}
+	}
+
+	// Benchmark scoped instance creation and retrieval
+	b.Run("ScopedCreation", func(b *testing.B) {
+		// Setup a scope for the benchmark
+		cleanup := BeginScope()
+		defer cleanup()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = IOC(newBenchService, Scoped)
+		}
+	})
+
+	// Benchmark nested scope creation and service resolution
+	b.Run("NestedScopes", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			WithScope(func() {
+				_ = IOC(newBenchService, Scoped)
+			})
+		}
+	})
+
+	// Benchmark concurrent scope access
+	b.Run("ConcurrentScopeAccess", func(b *testing.B) {
+		// Use multiple goroutines to simulate concurrent access
+		b.ResetTimer()
+
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				WithScope(func() {
+					for j := 0; j < 5; j++ {
+						_ = IOC(newBenchService, Scoped)
+					}
+				})
+			}
+		})
+	})
+
+	// Compare singleton vs scoped vs transient performance
+	b.Run("ScopeComparison", func(b *testing.B) {
+		// Singleton benchmark
+		b.Run("Singleton", func(b *testing.B) {
+			ClearInstances()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = IOC(newBenchService)
+			}
+		})
+
+		// Scoped benchmark
+		b.Run("Scoped", func(b *testing.B) {
+			ClearInstances()
+			cleanup := BeginScope()
+			defer cleanup()
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = IOC(newBenchService, Scoped)
+			}
+		})
+
+		// Transient benchmark
+		b.Run("Transient", func(b *testing.B) {
+			ClearInstances()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = IOC(newBenchService, Transient)
+			}
+		})
+	})
 }

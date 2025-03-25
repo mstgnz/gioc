@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Scope represents the lifetime of a component in the IoC container
@@ -41,34 +42,14 @@ const (
 	Scoped
 )
 
-// MapPool is a sync.Pool for map[uintptr]any to reduce allocation overhead
-type MapPool struct {
-	pool sync.Pool
-}
+// ScopeID represents a unique identifier for a scope
+type ScopeID string
 
-// NewMapPool creates a new MapPool
-func NewMapPool() *MapPool {
-	return &MapPool{
-		pool: sync.Pool{
-			New: func() interface{} {
-				return make(map[uintptr]any)
-			},
-		},
-	}
-}
-
-// Get returns a map from the pool
-func (p *MapPool) Get() map[uintptr]any {
-	return p.pool.Get().(map[uintptr]any)
-}
-
-// Put returns a map to the pool after cleaning it
-func (p *MapPool) Put(m map[uintptr]any) {
-	// Clear the map before returning it to the pool
-	for k := range m {
-		delete(m, k)
-	}
-	p.pool.Put(m)
+// ScopeContext maintains instances within a specific scope
+type ScopeContext struct {
+	id        ScopeID
+	instances map[uintptr]any
+	mu        sync.RWMutex
 }
 
 var (
@@ -79,9 +60,9 @@ var (
 	scopes    = make(map[uintptr]Scope, 16)
 	// Track dependency graph for cycle detection
 	dependencyGraph = make(map[uintptr]map[uintptr]bool, 16)
-	// Track current resolution path for cycle detection
-	currentPath    = make([]uintptr, 0, 8) // Pre-allocate with expected capacity
-	tempPathBuffer = make([]string, 0, 8)  // Reusable buffer for path strings
+	// Track current resolution path for cycle detection using goroutine-local storage
+	resolutionPathMap = sync.Map{}           // map[goroutineID][]uintptr
+	tempPathBuffer    = make([]string, 0, 8) // Reusable buffer for path strings
 
 	// Precompiled regex for parameter name extraction
 	paramRegex = regexp.MustCompile(`func\s+\w+\s*\((.*?)\)`)
@@ -97,6 +78,17 @@ var (
 	// Type registry for storing instances by type
 	directInstances = make(map[string]interface{})
 	directMutex     sync.RWMutex
+
+	// Current active scope context
+	currentScopeContext *ScopeContext
+	scopeContextMutex   sync.RWMutex
+
+	// Scope ID için statik sayaç
+	scopeCounter      int
+	scopeCounterMutex sync.Mutex
+
+	// Create a mutex specifically for resolution path operations
+	resolutionPathMutex sync.Mutex
 )
 
 // initializeContainer initializes the global container state
@@ -105,7 +97,111 @@ func initializeContainer() {
 	types = make(map[uintptr]reflect.Type, 16)
 	scopes = make(map[uintptr]Scope, 16)
 	dependencyGraph = make(map[uintptr]map[uintptr]bool, 16)
-	currentPath = make([]uintptr, 0, 8)
+	resolutionPathMap = sync.Map{}
+}
+
+// BeginScope creates and activates a new scope context.
+// Any subsequent requests for scoped instances will be resolved within this scope.
+//
+// Returns a cleanup function that should be called when the scope ends to properly
+// clean up resources.
+//
+// Example:
+//
+//	func handleRequest(w http.ResponseWriter, r *http.Request) {
+//	    cleanup := gioc.BeginScope()
+//	    defer cleanup()
+//
+//	    // Get scoped instance
+//	    requestService := gioc.IOC(NewRequestService, gioc.Scoped)
+//	    // Use requestService...
+//	}
+func BeginScope() func() {
+	scopeContextMutex.Lock()
+	defer scopeContextMutex.Unlock()
+
+	previousScope := currentScopeContext
+	currentScopeContext = NewScopeContext()
+
+	return func() {
+		scopeContextMutex.Lock()
+		defer scopeContextMutex.Unlock()
+
+		// Cleanup the scope
+		if currentScopeContext != nil {
+			currentScopeContext.Cleanup()
+		}
+
+		// Restore previous scope
+		currentScopeContext = previousScope
+	}
+}
+
+// GetCurrentScopeContext returns the current active scope context.
+// Returns nil if no scope context is active.
+func getCurrentScopeContext() *ScopeContext {
+	scopeContextMutex.RLock()
+	defer scopeContextMutex.RUnlock()
+	return currentScopeContext
+}
+
+// GetActiveScope returns the ID of the current active scope.
+// Returns an empty string if no scope is active.
+//
+// Example:
+//
+//	func handleRequest(w http.ResponseWriter, r *http.Request) {
+//	    cleanup := gioc.BeginScope()
+//	    defer cleanup()
+//
+//	    scopeID := gioc.GetActiveScope()
+//	    fmt.Printf("Active scope: %s\n", scopeID)
+//	}
+func GetActiveScope() string {
+	scopeContextMutex.RLock()
+	defer scopeContextMutex.RUnlock()
+
+	if currentScopeContext == nil {
+		return ""
+	}
+	return string(currentScopeContext.id)
+}
+
+// ListScopedInstances prints all instances in the current scope.
+// If no scope is active, it prints a message indicating that no scope is active.
+//
+// Example:
+//
+//	func handleRequest(w http.ResponseWriter, r *http.Request) {
+//	    cleanup := gioc.BeginScope()
+//	    defer cleanup()
+//
+//	    // Get scoped instance
+//	    requestService := gioc.IOC(NewRequestService, gioc.Scoped)
+//
+//	    // List all instances in the current scope
+//	    gioc.ListScopedInstances()
+//	}
+func ListScopedInstances() {
+	scopeCtx := getCurrentScopeContext()
+	if scopeCtx == nil {
+		fmt.Println("No active scope")
+		return
+	}
+
+	scopeCtx.mu.RLock()
+	defer scopeCtx.mu.RUnlock()
+
+	fmt.Printf("Instances in scope %s:\n", scopeCtx.id)
+	if len(scopeCtx.instances) == 0 {
+		fmt.Println("  No instances in this scope")
+		return
+	}
+
+	for key, instance := range scopeCtx.instances {
+		instanceType := reflect.TypeOf(instance)
+		fmt.Printf("  Key: %v, Type: %v, Instance: %v\n", key, instanceType, instance)
+	}
 }
 
 // IOC registers and initializes instances of components using lazy initialization.
@@ -157,12 +253,37 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 		return fn()
 	}
 
-	// For Scoped scope, check if we're in a new scope
+	// For Scoped scope, check if we're in a scope
 	if componentScope == Scoped {
-		// TODO: Implement scope tracking
-		// For now, behave like Transient
+		scopeCtx := getCurrentScopeContext()
+		if scopeCtx != nil {
+			// Try to get from current scope
+			if instance, exists := scopeCtx.Get(fnPtr); exists {
+				if typed, ok := instance.(T); ok {
+					return typed
+				}
+				panic(fmt.Sprintf("type assertion failed: expected %T, got %T", *new(T), instance))
+			}
+
+			// Create new instance for this scope
+			// Add to resolution path for cycle detection
+			currentPath := getCurrentResolutionPath()
+			newPath := append(append([]uintptr(nil), currentPath...), fnPtr)
+			updateResolutionPath(newPath)
+
+			instance := fn()
+
+			// Remove from resolution path
+			updateResolutionPath(currentPath)
+
+			scopeCtx.Set(fnPtr, instance)
+			return instance
+		}
+		// No active scope, behave like Transient
 		return fn()
 	}
+
+	// Singleton scope handling
 
 	// Try to get existing instance with read lock first
 	mu.RLock()
@@ -175,22 +296,18 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 	}
 	mu.RUnlock()
 
-	// Add current component to resolution path (with capacity check)
-	if len(currentPath) < cap(currentPath) {
-		currentPath = append(currentPath, fnPtr)
-	} else {
-		// Need to reallocate
-		newPath := make([]uintptr, len(currentPath), len(currentPath)*2)
-		copy(newPath, currentPath)
-		newPath = append(newPath, fnPtr)
-		currentPath = newPath
-	}
+	// Get the current resolution path for this goroutine
+	currentPath := getCurrentResolutionPath()
+
+	// Create a new path with the current function (deep copy to avoid modifying the original)
+	newPath := append(append([]uintptr(nil), currentPath...), fnPtr)
+	updateResolutionPath(newPath)
 
 	// Create the instance before acquiring the write lock
 	instance := fn()
 
-	// Remove current component from resolution path
-	currentPath = currentPath[:len(currentPath)-1]
+	// Restore the previous path
+	updateResolutionPath(currentPath)
 
 	// Double-check pattern with write lock
 	mu.Lock()
@@ -234,6 +351,12 @@ func DirectIOC[T any](fn func() T, scope ...Scope) T {
 	// Get function pointer directly
 	fnPtr := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Entry()
 
+	// Check for dependency cycles the same way as IOC
+	if hasCycle := checkForCycle(fnPtr); hasCycle {
+		cyclePath := getCyclePath()
+		panic(fmt.Sprintf("circular dependency detected: %v", cyclePath))
+	}
+
 	// Determine scope
 	var componentScope Scope = Singleton
 	if len(scope) > 0 {
@@ -253,8 +376,18 @@ func DirectIOC[T any](fn func() T, scope ...Scope) T {
 	}
 	mu.RUnlock()
 
+	// Get the current resolution path for this goroutine
+	currentPath := getCurrentResolutionPath()
+
+	// Create a new path with the current function
+	newPath := append(append([]uintptr(nil), currentPath...), fnPtr)
+	updateResolutionPath(newPath)
+
 	// Create new instance
 	instance := fn()
+
+	// Restore the previous path
+	updateResolutionPath(currentPath)
 
 	// Only store if singleton
 	if componentScope == Singleton {
@@ -267,15 +400,86 @@ func DirectIOC[T any](fn func() T, scope ...Scope) T {
 		}
 
 		instances[fnPtr] = instance
+		// Store type information for better error messages
+		if _, ok := types[fnPtr]; !ok {
+			types[fnPtr] = reflect.TypeOf(instance)
+		}
+		scopes[fnPtr] = componentScope
 	}
 
 	return instance
 }
 
+// getCurrentResolutionPath gets the current goroutine's resolution path
+func getCurrentResolutionPath() []uintptr {
+	resolutionPathMutex.Lock()
+	defer resolutionPathMutex.Unlock()
+
+	// Get current goroutine ID - we'll use the goroutine ID as a key
+	gid := getGoroutineID()
+
+	// Get or create the path for this goroutine
+	if path, ok := resolutionPathMap.Load(gid); ok {
+		return path.([]uintptr)
+	}
+
+	// Create a new path for this goroutine
+	path := make([]uintptr, 0, 8)
+	resolutionPathMap.Store(gid, path)
+	return path
+}
+
+// updateResolutionPath updates the current goroutine's resolution path
+func updateResolutionPath(path []uintptr) {
+	resolutionPathMutex.Lock()
+	defer resolutionPathMutex.Unlock()
+
+	gid := getGoroutineID()
+	resolutionPathMap.Store(gid, path)
+}
+
+// clearResolutionPath removes the current goroutine's resolution path
+func clearResolutionPath() {
+	resolutionPathMutex.Lock()
+	defer resolutionPathMutex.Unlock()
+
+	gid := getGoroutineID()
+	resolutionPathMap.Delete(gid)
+}
+
+// clearAllResolutionPaths removes all resolution paths (for ClearInstances)
+func clearAllResolutionPaths() {
+	// Lock to ensure no other goroutine is using resolutionPathMap
+	resolutionPathMutex.Lock()
+	defer resolutionPathMutex.Unlock()
+
+	// Create a new sync.Map instead of trying to clear the existing one
+	// This is more thread-safe in concurrent environments
+	resolutionPathMap = sync.Map{}
+}
+
+// getGoroutineID returns a unique identifier for the current goroutine
+func getGoroutineID() int64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// Parse goroutine ID from the stack trace
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	var id int64
+	fmt.Sscanf(idField, "%d", &id)
+	return id
+}
+
 // checkForCycle checks if adding the given key would create a cycle in the dependency graph
 func checkForCycle(key uintptr) bool {
+	// Get the current goroutine's resolution path
+	path := getCurrentResolutionPath()
+
+	// Make a copy to avoid race conditions with other goroutines
+	pathCopy := make([]uintptr, len(path))
+	copy(pathCopy, path)
+
 	// If the key is already in the current path, we have a cycle
-	for _, pathKey := range currentPath {
+	for _, pathKey := range pathCopy {
 		if pathKey == key {
 			return true
 		}
@@ -285,33 +489,44 @@ func checkForCycle(key uintptr) bool {
 
 // getCyclePath returns a string representation of the cycle path
 func getCyclePath() string {
-	if len(currentPath) == 0 {
+	// Get the current goroutine's resolution path
+	path := getCurrentResolutionPath()
+
+	// Make a copy to avoid race conditions
+	pathCopy := make([]uintptr, len(path))
+	copy(pathCopy, path)
+
+	if len(pathCopy) == 0 {
 		return "empty path"
 	}
 
 	// Find the start of the cycle
 	cycleStart := 0
-	for i, key := range currentPath {
-		if key == currentPath[len(currentPath)-1] {
+	for i, key := range pathCopy {
+		if key == pathCopy[len(pathCopy)-1] {
 			cycleStart = i
 			break
 		}
 	}
 
-	// Reuse the tempPathBuffer to avoid allocations
-	tempPathBuffer = tempPathBuffer[:0]
+	// Create a local buffer to avoid races with the global one
+	localBuffer := make([]string, 0, 8)
 
 	// Build the cycle path string
-	for i := cycleStart; i < len(currentPath); i++ {
-		key := currentPath[i]
-		if t, exists := types[key]; exists {
-			tempPathBuffer = append(tempPathBuffer, t.String())
+	for i := cycleStart; i < len(pathCopy); i++ {
+		key := pathCopy[i]
+		mu.RLock() // Lock while accessing the types map
+		t, exists := types[key]
+		mu.RUnlock()
+
+		if exists {
+			localBuffer = append(localBuffer, t.String())
 		} else {
-			tempPathBuffer = append(tempPathBuffer, fmt.Sprintf("unknown(%d)", key))
+			localBuffer = append(localBuffer, fmt.Sprintf("unknown(%d)", key))
 		}
 	}
 
-	return fmt.Sprintf("%v", tempPathBuffer)
+	return fmt.Sprintf("%v", localBuffer)
 }
 
 // ListInstances prints all currently registered instances in the IoC container.
@@ -440,8 +655,8 @@ func MemoryStats() map[string]int {
 		"dependencyGraph":   len(dependencyGraph),
 		"paramNameCache":    len(paramNameCache),
 		"directInstances":   len(directInstances),
-		"currentPathCap":    cap(currentPath),
-		"currentPathLen":    len(currentPath),
+		"currentPathCap":    cap(getCurrentResolutionPath()),
+		"currentPathLen":    len(getCurrentResolutionPath()),
 		"tempPathBufferCap": cap(tempPathBuffer),
 	}
 
@@ -893,36 +1108,151 @@ func TypeCount() int {
 	return len(directInstances)
 }
 
-// ClearInstances removes all registered instances from the IoC container.
+// ClearInstances removes all instances from the container.
+// This is primarily useful for testing.
+//
+// Example:
+//
+//	func TestMyService(t *testing.T) {
+//	    // Start with a clean state
+//	    gioc.ClearInstances()
+//	    // Register a mock database
+//	    gioc.RegisterInstance(&MockDatabase{})
+//	    // Run tests...
+//	}
 func ClearInstances() {
 	mu.Lock()
 	paramNameCacheMutex.Lock()
 	directMutex.Lock()
+	scopeContextMutex.Lock()
+	defer mu.Unlock()
+	defer paramNameCacheMutex.Unlock()
+	defer directMutex.Unlock()
+	defer scopeContextMutex.Unlock()
 
-	// Clear maps
-	for k := range instances {
-		delete(instances, k)
-	}
-	for k := range types {
-		delete(types, k)
-	}
-	for k := range scopes {
-		delete(scopes, k)
-	}
-	for k := range dependencyGraph {
-		delete(dependencyGraph, k)
-	}
+	// Clear all instances
+	instances = make(map[uintptr]any, 16)
+	types = make(map[uintptr]reflect.Type, 16)
+	scopes = make(map[uintptr]Scope, 16)
+	dependencyGraph = make(map[uintptr]map[uintptr]bool, 16)
+
+	// Clear parameter name cache
 	for k := range paramNameCache {
 		delete(paramNameCache, k)
 	}
+
+	// Clear direct instances
 	for k := range directInstances {
 		delete(directInstances, k)
 	}
 
-	// Reset path
-	currentPath = currentPath[:0]
+	// Clear type registry
+	typeRegistryMutex.Lock()
+	for k := range typeRegistry {
+		delete(typeRegistry, k)
+	}
+	typeRegistryMutex.Unlock()
 
-	directMutex.Unlock()
-	paramNameCacheMutex.Unlock()
-	mu.Unlock()
+	// Clear all resolution paths - use the thread-safe method
+	clearAllResolutionPaths()
+
+	// Clear any active scope context
+	if currentScopeContext != nil {
+		currentScopeContext.Cleanup()
+		currentScopeContext = nil
+	}
+}
+
+// WithScope executes the provided function within a new scope.
+// It automatically creates a new scope before executing the function and
+// cleans up the scope after the function completes, regardless of whether
+// the function panics or not.
+//
+// Example:
+//
+//	gioc.WithScope(func() {
+//	    // This code runs within a scope
+//	    service := gioc.IOC(NewRequestService, gioc.Scoped)
+//	    // Use service...
+//	})
+func WithScope(fn func()) {
+	cleanup := BeginScope()
+	defer cleanup()
+
+	fn()
+}
+
+// NewScopeContext creates a new scope context
+func NewScopeContext() *ScopeContext {
+	// scope ID için zamanı ve bir benzersiz değer (nano saniye) kullanıyoruz
+	// Aynı zamanda iç içe scope'lar için benzersizliği garanti etmek için benzersiz bir sayaç değeri de ekleyeceğiz
+
+	// Benzersiz sayaç değeri al
+	scopeCounterMutex.Lock()
+	scopeCounter++
+	uniqueCounter := scopeCounter
+	scopeCounterMutex.Unlock()
+
+	scopeID := fmt.Sprintf("scope-%d-%d", time.Now().UnixNano(), uniqueCounter)
+
+	return &ScopeContext{
+		id:        ScopeID(scopeID),
+		instances: make(map[uintptr]any),
+	}
+}
+
+// Get returns an instance from the scope context
+func (s *ScopeContext) Get(key uintptr) (any, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	instance, exists := s.instances[key]
+	return instance, exists
+}
+
+// Set stores an instance in the scope context
+func (s *ScopeContext) Set(key uintptr, instance any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.instances[key] = instance
+}
+
+// Cleanup removes all instances from the scope context
+func (s *ScopeContext) Cleanup() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Create a new map to avoid any race conditions with existing references
+	s.instances = make(map[uintptr]any)
+}
+
+// ListDependencyStatus prints details about the current dependency resolution state.
+// This includes information about active resolution paths and cached type information.
+// This function is intended for debugging purposes only.
+//
+// Example:
+//
+//	func debugMyApp() {
+//	    // Print dependency status
+//	    gioc.ListDependencyStatus()
+//	}
+func ListDependencyStatus() {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	fmt.Println("IoC Container Status:")
+	fmt.Println("=====================")
+
+	// Count of active goroutines with resolution paths
+	var pathCount int
+	resolutionPathMap.Range(func(_, _ interface{}) bool {
+		pathCount++
+		return true
+	})
+
+	fmt.Printf("Active Resolution Goroutines: %d\n", pathCount)
+	fmt.Printf("Registered Types: %d\n", len(types))
+
+	fmt.Println("\nType Registry:")
+	for key, t := range types {
+		fmt.Printf("  Key: %v, Type: %v\n", key, t)
+	}
 }
