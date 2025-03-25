@@ -25,11 +25,24 @@ import (
 	"sync"
 )
 
+// Scope represents the lifetime of a component in the IoC container
+type Scope int
+
+const (
+	// Singleton scope (default): One instance per application lifetime
+	Singleton Scope = iota
+	// Transient scope: New instance each time
+	Transient
+	// Scoped scope: One instance per scope (e.g., per request)
+	Scoped
+)
+
 var (
 	once      sync.Once
 	mu        sync.RWMutex
 	instances = make(map[uintptr]any)
 	types     = make(map[uintptr]reflect.Type)
+	scopes    = make(map[uintptr]Scope)
 )
 
 // IOC registers and initializes instances of components using lazy initialization.
@@ -57,11 +70,12 @@ var (
 //	    svc2 := gioc.IOC(NewService)
 //	    // svc1 and svc2 are the same instance
 //	}
-func IOC[T any](fn func() T) T {
+func IOC[T any](fn func() T, scope ...Scope) T {
 	// Initialize the instances map only once
 	once.Do(func() {
 		instances = make(map[uintptr]any)
 		types = make(map[uintptr]reflect.Type)
+		scopes = make(map[uintptr]Scope)
 	})
 
 	// Get the function pointer and type information
@@ -70,6 +84,24 @@ func IOC[T any](fn func() T) T {
 	fnType := fnValue.Type()
 	returnType := fnType.Out(0)
 	expectedType := reflect.TypeOf((*T)(nil)).Elem()
+
+	// Determine the scope (default to Singleton if not specified)
+	var componentScope Scope = Singleton
+	if len(scope) > 0 {
+		componentScope = scope[0]
+	}
+
+	// For Transient scope, always create a new instance
+	if componentScope == Transient {
+		return fn()
+	}
+
+	// For Scoped scope, check if we're in a new scope
+	if componentScope == Scoped {
+		// TODO: Implement scope tracking
+		// For now, behave like Transient
+		return fn()
+	}
 
 	// Try to get existing instance with read lock first
 	mu.RLock()
@@ -111,12 +143,14 @@ func IOC[T any](fn func() T) T {
 	// Store the new instance
 	instances[key] = instance
 	types[key] = returnType
+	scopes[key] = componentScope
 
 	// Set up finalizer for cleanup
 	runtime.SetFinalizer(instance, func(interface{}) {
 		mu.Lock()
 		delete(instances, key)
 		delete(types, key)
+		delete(scopes, key)
 		mu.Unlock()
 	})
 
@@ -141,7 +175,15 @@ func ListInstances() {
 
 	fmt.Println("Registered instances:")
 	for key, instance := range instances {
-		fmt.Printf("Key: %v, Type: %v, Instance: %v\n", key, types[key], instance)
+		scope := scopes[key]
+		scopeName := "Singleton"
+		switch scope {
+		case Transient:
+			scopeName = "Transient"
+		case Scoped:
+			scopeName = "Scoped"
+		}
+		fmt.Printf("Key: %v, Type: %v, Scope: %s, Instance: %v\n", key, types[key], scopeName, instance)
 	}
 }
 
@@ -167,6 +209,7 @@ func ClearInstances() {
 
 	instances = make(map[uintptr]any)
 	types = make(map[uintptr]reflect.Type)
+	scopes = make(map[uintptr]Scope)
 }
 
 // GetInstanceCount returns the number of currently registered instances in the IoC container.
