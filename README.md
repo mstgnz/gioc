@@ -3,6 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/mstgnz/gioc.svg)](https://pkg.go.dev/github.com/mstgnz/gioc)
 [![Go Report Card](https://goreportcard.com/badge/github.com/mstgnz/gioc)](https://goreportcard.com/report/github.com/mstgnz/gioc)
 [![License](https://img.shields.io/github/license/mstgnz/gioc)](LICENSE)
+[![codecov](https://codecov.io/gh/mstgnz/gioc/branch/main/graph/badge.svg)](https://codecov.io/gh/mstgnz/gioc)
 
 `gioc` is a simple and lightweight **Inversion of Control (IoC)** container for Go. It provides a way to manage dependencies in your application while following the **lazy initialization** and **singleton** design pattern. With `gioc`, you can ensure that each component is initialized only once and reused whenever needed, helping to manage your application's dependencies efficiently.
 
@@ -252,3 +253,43 @@ Contributions are welcome! If you have any suggestions, improvements, or bug fix
 ## Support
 
 If you encounter any issues or have questions, please open an issue on the GitHub repository.
+
+## Testing
+
+The project includes comprehensive test coverage and benchmarks:
+
+### Test Coverage
+
+Run tests with coverage:
+
+```bash
+go test -v -race -cover ./...
+```
+
+Current test coverage is available at [Codecov](https://codecov.io/gh/mstgnz/gioc).
+
+### Benchmarks
+
+Run benchmarks:
+
+```bash
+go test -bench=. -benchmem ./...
+```
+
+Available benchmark tests:
+
+- `BenchmarkIOC`: Basic performance test
+- `BenchmarkIOCConcurrent`: Concurrent access performance
+- `BenchmarkIOCMultipleTypes`: Performance with multiple types
+- `BenchmarkIOCLargeStruct`: Performance with large structs
+- `BenchmarkIOCWithDependencies`: Performance with dependency injection
+- `BenchmarkIOCMemoryAllocation`: Memory allocation patterns
+
+### Continuous Integration
+
+The project uses GitHub Actions for continuous integration:
+
+- Runs tests on every push and pull request
+- Generates and uploads test coverage reports
+- Performs race condition detection
+- Runs benchmarks

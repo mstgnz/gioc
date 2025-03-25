@@ -194,6 +194,97 @@ func BenchmarkIOCConcurrent(b *testing.B) {
 	})
 }
 
+// BenchmarkIOCMultipleTypes tests performance with multiple types
+func BenchmarkIOCMultipleTypes(b *testing.B) {
+	// Clear any existing instances
+	ClearInstances()
+
+	type Type1 struct{ value int }
+	type Type2 struct{ value string }
+	type Type3 struct{ value float64 }
+
+	newType1 := func() *Type1 { return &Type1{1} }
+	newType2 := func() *Type2 { return &Type2{"2"} }
+	newType3 := func() *Type3 { return &Type3{3.14} }
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = IOC(newType1)
+		_ = IOC(newType2)
+		_ = IOC(newType3)
+	}
+}
+
+// BenchmarkIOCLargeStruct tests performance with large structs
+func BenchmarkIOCLargeStruct(b *testing.B) {
+	// Clear any existing instances
+	ClearInstances()
+
+	type LargeStruct struct {
+		Data [1000]byte
+		Map  map[string]interface{}
+	}
+
+	newLargeStruct := func() *LargeStruct {
+		return &LargeStruct{
+			Map: make(map[string]interface{}),
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = IOC(newLargeStruct)
+	}
+}
+
+// BenchmarkIOCWithDependencies tests performance with dependency injection
+func BenchmarkIOCWithDependencies(b *testing.B) {
+	// Clear any existing instances
+	ClearInstances()
+
+	type Dep1 struct{ value int }
+	type Dep2 struct{ value string }
+	type Service struct {
+		dep1 *Dep1
+		dep2 *Dep2
+	}
+
+	newDep1 := func() *Dep1 { return &Dep1{1} }
+	newDep2 := func() *Dep2 { return &Dep2{"2"} }
+	newService := func() *Service {
+		return &Service{
+			dep1: IOC(newDep1),
+			dep2: IOC(newDep2),
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = IOC(newService)
+	}
+}
+
+// BenchmarkIOCMemoryAllocation tests memory allocation patterns
+func BenchmarkIOCMemoryAllocation(b *testing.B) {
+	// Clear any existing instances
+	ClearInstances()
+
+	type MemoryTest struct {
+		Data []byte
+	}
+
+	newMemoryTest := func() *MemoryTest {
+		return &MemoryTest{
+			Data: make([]byte, 1024),
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = IOC(newMemoryTest)
+	}
+}
+
 // TestIOCStress tests under stress conditions
 func TestIOCStress(t *testing.T) {
 	// Clear any existing instances
