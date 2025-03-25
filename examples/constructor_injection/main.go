@@ -43,6 +43,13 @@ func NewUserService(db *Database, logger *Logger) *UserService {
 	}
 }
 
+// Açık tip belirtimi ile injection sağlayan yardımcı fonksiyon
+func CreateUserService() *UserService {
+	db := gioc.IOC(NewDatabase)
+	logger := gioc.IOC(NewLogger)
+	return NewUserService(db, logger)
+}
+
 func main() {
 	fmt.Println("=== Constructor Injection Example ===")
 
@@ -78,4 +85,11 @@ func main() {
 	fmt.Printf("UserService2: %+v\n", userService2)
 	fmt.Printf("Database connection: %s\n", userService2.db.connection)
 	fmt.Printf("Logger level: %s\n", userService2.logger.level)
+
+	// Approach 3: Reflection kullanımını azaltan yaklaşım
+	fmt.Println("\nApproach 3: Minimum reflection with explicit type declaration")
+	userService3 := gioc.IOC(CreateUserService)
+	fmt.Printf("UserService3: %+v\n", userService3)
+	fmt.Printf("Database connection: %s\n", userService3.db.connection)
+	fmt.Printf("Logger level: %s\n", userService3.logger.level)
 }

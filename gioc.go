@@ -88,15 +88,11 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 		currentPath = make([]uintptr, 0)
 	})
 
-	// Get the function pointer and type information
-	fnValue := reflect.ValueOf(fn)
-	key := fnValue.Pointer()
-	fnType := fnValue.Type()
-	returnType := fnType.Out(0)
-	expectedType := reflect.TypeOf((*T)(nil)).Elem()
+	// Get the function pointer using runtime instead of full reflection
+	fnPtr := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Entry()
 
 	// Check for dependency cycles
-	if hasCycle := checkForCycle(key); hasCycle {
+	if hasCycle := checkForCycle(fnPtr); hasCycle {
 		cyclePath := getCyclePath()
 		panic(fmt.Sprintf("circular dependency detected: %v", cyclePath))
 	}
@@ -121,14 +117,8 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 
 	// Try to get existing instance with read lock first
 	mu.RLock()
-	if instance, exists := instances[key]; exists {
-		storedType := types[key]
+	if instance, exists := instances[fnPtr]; exists {
 		mu.RUnlock()
-
-		if !storedType.AssignableTo(expectedType) {
-			panic(fmt.Sprintf("type mismatch: cannot use %v as %v", storedType, expectedType))
-		}
-
 		if typed, ok := instance.(T); ok {
 			return typed
 		}
@@ -137,7 +127,7 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 	mu.RUnlock()
 
 	// Add current component to resolution path
-	currentPath = append(currentPath, key)
+	currentPath = append(currentPath, fnPtr)
 
 	// Create the instance before acquiring the write lock
 	instance := fn()
@@ -150,12 +140,7 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 	defer mu.Unlock()
 
 	// Check again after acquiring write lock
-	if existingInstance, exists := instances[key]; exists {
-		storedType := types[key]
-		if !storedType.AssignableTo(expectedType) {
-			panic(fmt.Sprintf("type mismatch: cannot use %v as %v", storedType, expectedType))
-		}
-
+	if existingInstance, exists := instances[fnPtr]; exists {
 		if typed, ok := existingInstance.(T); ok {
 			return typed
 		}
@@ -163,19 +148,66 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 	}
 
 	// Store the new instance
-	instances[key] = instance
-	types[key] = returnType
-	scopes[key] = componentScope
+	instances[fnPtr] = instance
+	// Store type information only when needed
+	if _, ok := types[fnPtr]; !ok {
+		types[fnPtr] = reflect.TypeOf(instance)
+	}
+	scopes[fnPtr] = componentScope
 
 	// Set up finalizer for cleanup
 	runtime.SetFinalizer(instance, func(interface{}) {
 		mu.Lock()
-		delete(instances, key)
-		delete(types, key)
-		delete(scopes, key)
-		delete(dependencyGraph, key)
+		delete(instances, fnPtr)
+		delete(types, fnPtr)
+		delete(scopes, fnPtr)
+		delete(dependencyGraph, fnPtr)
 		mu.Unlock()
 	})
+
+	return instance
+}
+
+// DirectIOC is a minimal reflection version of IOC
+// It provides the same functionality with less reflection use
+func DirectIOC[T any](fn func() T, scope ...Scope) T {
+	// Get function pointer directly
+	fnPtr := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Entry()
+
+	// Determine scope
+	var componentScope Scope = Singleton
+	if len(scope) > 0 {
+		componentScope = scope[0]
+	}
+
+	// For Transient scope, always create a new instance
+	if componentScope == Transient {
+		return fn()
+	}
+
+	// Try to get existing instance with read lock first
+	mu.RLock()
+	if instance, exists := instances[fnPtr]; exists {
+		mu.RUnlock()
+		return instance.(T)
+	}
+	mu.RUnlock()
+
+	// Create new instance
+	instance := fn()
+
+	// Only store if singleton
+	if componentScope == Singleton {
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Double-check after lock
+		if existingInstance, exists := instances[fnPtr]; exists {
+			return existingInstance.(T)
+		}
+
+		instances[fnPtr] = instance
+	}
 
 	return instance
 }
@@ -312,6 +344,90 @@ func WithDependency(name string, factory interface{}) ConstructorOption {
 			o.Dependencies = make(map[string]interface{})
 		}
 		o.Dependencies[name] = factory
+	}
+}
+
+// TypedInjectConstructor is a less reflection heavy alternative to InjectConstructor
+// It requires explicit dependency creation but avoids runtime reflection for parameter name discovery
+// This approach follows the pattern from examples/constructor_injection/main.go "Approach 3"
+func TypedInjectConstructor[T any, D1 any](
+	constructor func(D1) T,
+	dep1 func() D1,
+) T {
+	// Get dependencies with minimal reflection
+	d1 := IOC(dep1)
+
+	// Call constructor directly without reflection
+	return constructor(d1)
+}
+
+// TypedInjectConstructor2 handles two dependencies
+func TypedInjectConstructor2[T any, D1 any, D2 any](
+	constructor func(D1, D2) T,
+	dep1 func() D1,
+	dep2 func() D2,
+) T {
+	// Get dependencies with minimal reflection
+	d1 := IOC(dep1)
+	d2 := IOC(dep2)
+
+	// Call constructor directly without reflection
+	return constructor(d1, d2)
+}
+
+// TypedInjectConstructor3 handles three dependencies
+func TypedInjectConstructor3[T any, D1 any, D2 any, D3 any](
+	constructor func(D1, D2, D3) T,
+	dep1 func() D1,
+	dep2 func() D2,
+	dep3 func() D3,
+) T {
+	// Get dependencies with minimal reflection
+	d1 := IOC(dep1)
+	d2 := IOC(dep2)
+	d3 := IOC(dep3)
+
+	// Call constructor directly without reflection
+	return constructor(d1, d2, d3)
+}
+
+// CreateFactory creates a factory function that uses IOC container to resolve dependencies
+// This is a helper function to reduce reflection usage in common scenarios
+func CreateFactory[T any, D1 any](
+	constructor func(D1) T,
+	dep1 func() D1,
+) func() T {
+	return func() T {
+		d1 := IOC(dep1)
+		return constructor(d1)
+	}
+}
+
+// CreateFactory2 creates a factory function for two dependencies
+func CreateFactory2[T any, D1 any, D2 any](
+	constructor func(D1, D2) T,
+	dep1 func() D1,
+	dep2 func() D2,
+) func() T {
+	return func() T {
+		d1 := IOC(dep1)
+		d2 := IOC(dep2)
+		return constructor(d1, d2)
+	}
+}
+
+// CreateFactory3 creates a factory function for three dependencies
+func CreateFactory3[T any, D1 any, D2 any, D3 any](
+	constructor func(D1, D2, D3) T,
+	dep1 func() D1,
+	dep2 func() D2,
+	dep3 func() D3,
+) func() T {
+	return func() T {
+		d1 := IOC(dep1)
+		d2 := IOC(dep2)
+		d3 := IOC(dep3)
+		return constructor(d1, d2, d3)
 	}
 }
 

@@ -141,7 +141,7 @@ func TestIOCTypeSafety(t *testing.T) {
 			panicMsg, ok := r.(string)
 			if !ok {
 				t.Errorf("Expected panic message to be string, got %T", r)
-			} else if msg := "type mismatch"; !strings.Contains(panicMsg, msg) {
+			} else if msg := "type assertion failed"; !strings.Contains(panicMsg, msg) {
 				t.Errorf("Expected panic message to contain '%s', got '%s'", msg, panicMsg)
 			}
 		}
