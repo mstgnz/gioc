@@ -450,15 +450,6 @@ func updateResolutionPath(path []uintptr) {
 	resolutionPathMap.Store(gid, path)
 }
 
-// clearResolutionPath removes the current goroutine's resolution path
-func clearResolutionPath() {
-	resolutionPathMutex.Lock()
-	defer resolutionPathMutex.Unlock()
-
-	gid := getGoroutineID()
-	resolutionPathMap.Delete(gid)
-}
-
 // clearAllResolutionPaths removes all resolution paths (for ClearInstances)
 func clearAllResolutionPaths() {
 	// Lock to ensure no other goroutine is using resolutionPathMap
