@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -262,7 +263,8 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 				if typed, ok := instance.(T); ok {
 					return typed
 				}
-				panic(fmt.Sprintf("type assertion failed: expected %T, got %T", *new(T), instance))
+				funcName := runtime.FuncForPC(fnPtr).Name()
+				panic(fmt.Sprintf("type assertion failed in scoped instance: expected %T, got %T for function %s", *new(T), instance, funcName))
 			}
 
 			// Create new instance for this scope
@@ -292,7 +294,8 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 		if typed, ok := instance.(T); ok {
 			return typed
 		}
-		panic(fmt.Sprintf("type assertion failed: expected %T, got %T", *new(T), instance))
+		funcName := runtime.FuncForPC(fnPtr).Name()
+		panic(fmt.Sprintf("type assertion failed in singleton instance: expected %T, got %T for function %s", *new(T), instance, funcName))
 	}
 	mu.RUnlock()
 
@@ -318,7 +321,8 @@ func IOC[T any](fn func() T, scope ...Scope) T {
 		if typed, ok := existingInstance.(T); ok {
 			return typed
 		}
-		panic(fmt.Sprintf("type assertion failed: expected %T, got %T", *new(T), existingInstance))
+		funcName := runtime.FuncForPC(fnPtr).Name()
+		panic(fmt.Sprintf("type assertion failed in singleton double-check: expected %T, got %T for function %s", *new(T), existingInstance, funcName))
 	}
 
 	// Store the new instance
@@ -372,7 +376,11 @@ func DirectIOC[T any](fn func() T, scope ...Scope) T {
 	mu.RLock()
 	if instance, exists := instances[fnPtr]; exists {
 		mu.RUnlock()
-		return instance.(T)
+		if typed, ok := instance.(T); ok {
+			return typed
+		}
+		funcName := runtime.FuncForPC(fnPtr).Name()
+		panic(fmt.Sprintf("type assertion failed in DirectIOC: expected %T, got %T for function %s", *new(T), instance, funcName))
 	}
 	mu.RUnlock()
 
@@ -396,7 +404,11 @@ func DirectIOC[T any](fn func() T, scope ...Scope) T {
 
 		// Double-check after lock
 		if existingInstance, exists := instances[fnPtr]; exists {
-			return existingInstance.(T)
+			if typed, ok := existingInstance.(T); ok {
+				return typed
+			}
+			funcName := runtime.FuncForPC(fnPtr).Name()
+			panic(fmt.Sprintf("type assertion failed in DirectIOC double-check: expected %T, got %T for function %s", *new(T), existingInstance, funcName))
 		}
 
 		instances[fnPtr] = instance
@@ -464,8 +476,7 @@ func getGoroutineID() int64 {
 	n := runtime.Stack(buf[:], false)
 	// Parse goroutine ID from the stack trace
 	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
-	var id int64
-	fmt.Sscanf(idField, "%d", &id)
+	id, _ := strconv.ParseInt(idField, 10, 64)
 	return id
 }
 
@@ -967,7 +978,13 @@ func InjectConstructor[T any](constructor interface{}, opts ...ConstructorOption
 		panic("constructor must return exactly one value")
 	}
 
-	return result[0].Interface().(T)
+	resultInterface := result[0].Interface()
+	castedResult, ok := resultInterface.(T)
+	if !ok {
+		panic(fmt.Sprintf("type assertion failed in InjectConstructor: expected %T, got %T", *new(T), resultInterface))
+	}
+
+	return castedResult
 }
 
 // getParamName returns the name of the parameter at the given index
@@ -1010,6 +1027,10 @@ func getParamName(fn interface{}, index int) string {
 		currentLine++
 		if currentLine == line {
 			functionLine = scanner.Text()
+			break
+		}
+		// No need to continue if we've passed the target line
+		if currentLine > line {
 			break
 		}
 	}
@@ -1137,20 +1158,14 @@ func ClearInstances() {
 	dependencyGraph = make(map[uintptr]map[uintptr]bool, 16)
 
 	// Clear parameter name cache
-	for k := range paramNameCache {
-		delete(paramNameCache, k)
-	}
+	paramNameCache = make(map[uintptr][]string)
 
 	// Clear direct instances
-	for k := range directInstances {
-		delete(directInstances, k)
-	}
+	directInstances = make(map[string]interface{})
 
 	// Clear type registry
 	typeRegistryMutex.Lock()
-	for k := range typeRegistry {
-		delete(typeRegistry, k)
-	}
+	typeRegistry = make(map[string]any)
 	typeRegistryMutex.Unlock()
 
 	// Clear all resolution paths - use the thread-safe method
@@ -1184,10 +1199,10 @@ func WithScope(fn func()) {
 
 // NewScopeContext creates a new scope context
 func NewScopeContext() *ScopeContext {
-	// scope ID için zamanı ve bir benzersiz değer (nano saniye) kullanıyoruz
-	// Aynı zamanda iç içe scope'lar için benzersizliği garanti etmek için benzersiz bir sayaç değeri de ekleyeceğiz
+	// Using time and a unique value (nanoseconds) for scope ID
+	// Also adding a unique counter value to ensure uniqueness for nested scopes
 
-	// Benzersiz sayaç değeri al
+	// Get unique counter value
 	scopeCounterMutex.Lock()
 	scopeCounter++
 	uniqueCounter := scopeCounter
